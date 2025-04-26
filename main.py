@@ -6,7 +6,8 @@ import os
 import shutil
 import time
 import sys
-import threading
+import multiprocessing
+from multiprocessing import Process, Queue
 import queue
 import cv2
 import numpy as np
@@ -117,16 +118,26 @@ def resize_image_for_upload(image_file, max_size=1600, max_file_size_mb=2):
         return io.BytesIO(img_data)
 
 
-def clustering_worker(tolerance=0.6, min_cluster_size=1, save_mode="both",
+def clustering_worker(queue, tolerance=0.6, min_cluster_size=1, save_mode="both",
                       detection_model="hog", upsample_times=1, min_face_size=20,
                       low_memory_mode=False, batch_size=10):
-    """Background worker for clustering process"""
-    global clustering_progress
-
+    """Background worker for clustering process that uses a queue for communication"""
     try:
-        clustering_progress['status'] = 'running'
-        clustering_progress['message'] = 'Starting clustering process...'
-        clustering_progress['started_at'] = time.time()
+        # Send initial status update
+        queue.put(('status', 'running'))
+        queue.put(('message', 'Starting clustering process...'))
+        queue.put(('started_at', time.time()))
+
+        # Define a local status callback that puts messages in the queue
+        def process_status_callback(message):
+            queue.put(('message', message))
+            # Extract progress percentage if available
+            if "progress" in message.lower() and "%" in message:
+                try:
+                    progress_text = message.split("%")[0].split(":")[-1].strip()
+                    queue.put(('progress', float(progress_text)))
+                except:
+                    pass
 
         # Run clustering with status callback
         result_dir = cluster_faces(
@@ -138,69 +149,56 @@ def clustering_worker(tolerance=0.6, min_cluster_size=1, save_mode="both",
             min_face_size=min_face_size,
             low_memory_mode=low_memory_mode,
             batch_size=batch_size,
-            status_callback=status_callback
+            status_callback=process_status_callback
         )
 
-        # Update symlink to new output
-        if FACES_DIR.exists() or os.path.islink(str(FACES_DIR)):
-            try:
-                if os.path.islink(str(FACES_DIR)):
-                    os.unlink(str(FACES_DIR))
-                elif FACES_DIR.exists():
-                    shutil.rmtree(str(FACES_DIR))
-            except Exception as e:
-                clustering_progress['message'] = f"Error removing old symlink: {e}"
-
-        # Create new symlink
-        try:
-            os.symlink(Path(result_dir).resolve(), str(FACES_DIR), target_is_directory=True)
-        except Exception as e:
-            # Windows may need admin rights for symlinks, try a directory copy instead
-            if sys.platform == 'win32':
-                clustering_progress[
-                    'message'] = "Could not create symlink (Windows may require admin privileges). Using directory copy instead."
-                if not FACES_DIR.exists():
-                    FACES_DIR.mkdir(parents=True)
-                for item in Path(result_dir).iterdir():
-                    if item.is_dir():
-                        dest_dir = FACES_DIR / item.name
-                        if dest_dir.exists():
-                            shutil.rmtree(dest_dir)
-                        shutil.copytree(item, dest_dir)
-            else:
-                clustering_progress['message'] = f"Error creating symlink: {e}"
+        # Handle symlink or directory copying in the main process
+        # Just return the result directory path
+        queue.put(('result', result_dir))
 
         # Mark as completed
-        clustering_progress['completed_at'] = time.time()
-        duration = clustering_progress['completed_at'] - clustering_progress['started_at']
-        clustering_progress['message'] = f"Clustering completed in {duration:.1f} seconds"
-        clustering_progress['progress'] = 100
-        clustering_progress['status'] = 'completed'
-        clustering_progress['result'] = result_dir
+        completed_at = time.time()
+        queue.put(('completed_at', completed_at))
+        queue.put(('progress', 100))
+        queue.put(('status', 'completed'))
+
+        # Calculate duration for final message
+        started_at = None
+        for _ in range(queue.qsize()):
+            item = queue.get()
+            if item[0] == 'started_at':
+                started_at = item[1]
+                queue.put(item)  # Put it back
+            else:
+                queue.put(item)  # Put it back
+
+        if started_at:
+            duration = completed_at - started_at
+            queue.put(('message', f"Clustering completed in {duration:.1f} seconds"))
 
     except Exception as e:
-        clustering_progress['status'] = 'error'
-        clustering_progress['error'] = str(e)
-        clustering_progress['message'] = f"Error during clustering: {e}"
+        # Handle exceptions
+        queue.put(('status', 'error'))
+        queue.put(('error', str(e)))
+        queue.put(('message', f"Error during clustering: {e}"))
         print(f"Error in clustering worker: {e}")
 
 
 def update_progress():
-    """Update progress from status queue"""
+    """Update progress from multiprocessing queue"""
     global clustering_progress
 
-    while not status_queue.empty():
-        message = status_queue.get_nowait()
-        clustering_progress['message'] = message
+    mp_queue = app.config.get('MP_QUEUE')
+    if mp_queue is None:
+        return  # No queue yet, nothing to update
 
-        # Extract progress percentage if available
-        if "progress" in message.lower() and "%" in message:
-            try:
-                progress_text = message.split("%")[0].split(":")[-1].strip()
-                clustering_progress['progress'] = float(progress_text)
-            except:
-                # If we can't parse progress, just continue
-                pass
+    # Get all available messages without blocking
+    while True:
+        try:
+            key, value = mp_queue.get_nowait()
+            clustering_progress[key] = value
+        except (queue.Empty, ValueError):
+            break
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -326,9 +324,73 @@ def index():
     )
 
 
+# Add a function to handle the completed clustering results
+def handle_completed_clustering():
+    """Handle creating symlinks or copying directories after clustering completes"""
+    global clustering_progress
+
+    # Check if we've already handled this completion
+    if clustering_progress.get('handled_completion', False):
+        return
+
+    result_dir = clustering_progress['result']
+
+    # Update symlink to new output
+    if FACES_DIR.exists() or os.path.islink(str(FACES_DIR)):
+        try:
+            if os.path.islink(str(FACES_DIR)):
+                os.unlink(str(FACES_DIR))
+            elif FACES_DIR.exists():
+                shutil.rmtree(str(FACES_DIR))
+        except Exception as e:
+            clustering_progress['message'] += f" Error removing old symlink: {e}"
+
+    # Create new symlink
+    try:
+        os.symlink(Path(result_dir).resolve(), str(FACES_DIR), target_is_directory=True)
+    except Exception as e:
+        # Windows may need admin rights for symlinks, try a directory copy instead
+        if sys.platform == 'win32':
+            clustering_progress[
+                'message'] += " Could not create symlink (Windows may require admin privileges). Using directory copy instead."
+            if not FACES_DIR.exists():
+                FACES_DIR.mkdir(parents=True)
+            for item in Path(result_dir).iterdir():
+                if item.is_dir():
+                    dest_dir = FACES_DIR / item.name
+                    if dest_dir.exists():
+                        shutil.rmtree(dest_dir)
+                    shutil.copytree(item, dest_dir)
+        else:
+            clustering_progress['message'] += f" Error creating symlink: {e}"
+
+    app.config['MP_QUEUE'] = None
+    app.config['MP_PROCESS'] = None
+    # Mark as handled so we don't do it again
+    clustering_progress['handled_completion'] = True
+
+
+def add_cache_headers(response):
+    """Add cache control headers to static resources"""
+    if request.path.startswith('/static/'):
+        # For resources that rarely change (CSS, JS, etc.)
+        if any(request.path.endswith(ext) for ext in ['.css', '.js', '.woff', '.ttf', '.woff2']):
+            # Cache for 1 week
+            response.headers['Cache-Control'] = 'public, max-age=604800'
+        # For face images that don't change once clustered
+        elif request.path.startswith('/static/faces/'):
+            # Cache for 1 day
+            response.headers['Cache-Control'] = 'public, max-age=86400'
+        # For other static assets
+        else:
+            # Cache for 1 hour
+            response.headers['Cache-Control'] = 'public, max-age=3600'
+    return response
+
+
 @app.route('/cluster_now', methods=['POST'])
 def cluster_now():
-    """Start the clustering process"""
+    """Start the clustering process with multiprocessing"""
     global clustering_progress
 
     # Reset progress
@@ -367,9 +429,13 @@ def cluster_now():
     else:  # More than 4GB
         batch_size = 20
 
-    # Start clustering in background thread
-    cluster_thread = threading.Thread(
+    # Create a multiprocessing queue for communication
+    mp_queue = multiprocessing.Queue()
+
+    # Start clustering in a separate process
+    mp_process = Process(
         target=clustering_worker,
+        args=(mp_queue,),
         kwargs={
             'tolerance': tolerance,
             'min_cluster_size': min_cluster_size,
@@ -381,8 +447,12 @@ def cluster_now():
             'batch_size': batch_size
         }
     )
-    cluster_thread.daemon = True
-    cluster_thread.start()
+    mp_process.daemon = True
+    mp_process.start()
+
+    # Store multiprocessing objects in the app config
+    app.config['MP_QUEUE'] = mp_queue
+    app.config['MP_PROCESS'] = mp_process
 
     return redirect(url_for('progress_page'))
 
@@ -396,7 +466,14 @@ def progress_page():
 @app.route('/get_progress')
 def get_progress():
     """API endpoint to get current progress"""
-    update_progress()
+    mp_queue = app.config.get('MP_QUEUE')
+
+    if mp_queue:
+        update_progress()
+
+        # If processing is complete and there's a result, handle the symlink/directory
+        if clustering_progress['status'] == 'completed' and clustering_progress['result']:
+            handle_completed_clustering()
 
     return jsonify(clustering_progress)
 
@@ -508,5 +585,9 @@ if __name__ == "__main__":
     if not FACES_DIR.exists() and not os.path.islink(str(FACES_DIR)):
         FACES_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Required for Windows support of multiprocessing
+    multiprocessing.freeze_support()
+
     # Start Flask
     app.run(debug=True, host='0.0.0.0', port=5000)
+    app.after_request(add_cache_headers)

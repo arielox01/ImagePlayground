@@ -3,6 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#343a40">
+    <link rel="apple-touch-icon" href="{{ url_for('static', filename='img/icon-192.png') }}">
     <title>Face Clustering App</title>
     <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.1/css/all.min.css">
@@ -77,6 +79,41 @@
         .preset-btn {
             margin-right: 5px;
             margin-bottom: 10px;
+        }
+    </style>
+    <style>
+        /* Add this to reduce layout shifts while images load */
+        .preview-img {
+            min-height: 180px;
+            background-color: #f0f0f0;
+            position: relative;
+        }
+
+        .preview-img::before {
+            content: "\f007";  /* User icon from Font Awesome */
+            font-family: "Font Awesome 5 Free";
+            position: absolute;
+            font-size: 3rem;
+            color: #dee2e6;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        /* Add animation for image fade-in */
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        /* Add smooth transitions for hover effects */
+        .cluster-card {
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .cluster-card:hover {
+            transform: translateY(-5px) scale(1.02);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
         }
     </style>
 </head>
@@ -377,6 +414,109 @@
                     minFaceSize.value = '15';
                     break;
             }
+        }
+    </script>
+    <script>
+        // Register service worker for caching
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/static/js/service-worker.js')
+                    .then(registration => {
+                        console.log('ServiceWorker registration successful with scope: ', registration.scope);
+                    })
+                    .catch(err => {
+                        console.log('ServiceWorker registration failed: ', err);
+                    });
+            });
+        }
+
+        // Local storage caching for cluster view preferences
+        function saveClusterViewPreferences() {
+            // Cache the current sorting/view preferences
+            const preferences = {
+                sortOrder: document.querySelector('#sortOrder')?.value || 'default',
+                viewMode: document.querySelector('#viewMode')?.value || 'grid',
+                lastVisited: new Date().toISOString()
+            };
+            localStorage.setItem('cluster_view_preferences', JSON.stringify(preferences));
+        }
+
+        function loadClusterViewPreferences() {
+            const savedPreferences = localStorage.getItem('cluster_view_preferences');
+            if (savedPreferences) {
+                const preferences = JSON.parse(savedPreferences);
+                // Apply saved preferences to the UI if elements exist
+                if (document.querySelector('#sortOrder') && preferences.sortOrder) {
+                    document.querySelector('#sortOrder').value = preferences.sortOrder;
+                }
+                if (document.querySelector('#viewMode') && preferences.viewMode) {
+                    document.querySelector('#viewMode').value = preferences.viewMode;
+                    // Also apply the view mode class if needed
+                    const container = document.querySelector('.row');
+                    if (container) {
+                        if (preferences.viewMode === 'list') {
+                            container.classList.add('list-view');
+                        } else {
+                            container.classList.remove('list-view');
+                        }
+                    }
+                }
+            }
+        }
+
+        // Load preferences on page load
+        document.addEventListener('DOMContentLoaded', loadClusterViewPreferences);
+
+        // Save preferences when changing settings
+        document.querySelectorAll('#sortOrder, #viewMode').forEach(el => {
+            el.addEventListener('change', saveClusterViewPreferences);
+        });
+
+        // Image lazy loading and progressive enhancement
+        document.addEventListener('DOMContentLoaded', function() {
+            // Add lazy loading to all cluster preview images
+            document.querySelectorAll('.preview-img').forEach(img => {
+                img.loading = 'lazy';
+
+                // Add fade-in effect when images load
+                img.style.opacity = '0';
+                img.style.transition = 'opacity 0.5s';
+                img.onload = function() {
+                    this.style.opacity = '1';
+                };
+            });
+        });
+
+        // Use IndexedDB to cache face encoding metadata for faster re-clustering
+        let db;
+
+        // Initialize IndexedDB
+        function initDB() {
+            const request = indexedDB.open('FaceClusteringDB', 1);
+
+            request.onerror = function(event) {
+                console.error('IndexedDB error:', event.target.errorCode);
+            };
+
+            request.onupgradeneeded = function(event) {
+                const db = event.target.result;
+
+                // Create object store for face encodings
+                if (!db.objectStoreNames.contains('faceEncodings')) {
+                    const store = db.createObjectStore('faceEncodings', { keyPath: 'imagePath' });
+                    store.createIndex('timestamp', 'timestamp', { unique: false });
+                }
+            };
+
+            request.onsuccess = function(event) {
+                db = event.target.result;
+                console.log('IndexedDB initialized successfully');
+            };
+        }
+
+        // Initialize IndexedDB on page load
+        if ('indexedDB' in window) {
+            initDB();
         }
     </script>
 </body>
