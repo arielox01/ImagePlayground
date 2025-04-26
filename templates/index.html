@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Clustering App</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.1/css/all.min.css">
+    <style>
+        .cluster-card {
+            transition: transform 0.2s;
+            margin-bottom: 20px;
+        }
+        .cluster-card:hover {
+            transform: scale(1.03);
+        }
+        .preview-img {
+            width: 100%;
+            height: 180px;
+            object-fit: cover;
+            border-radius: 4px 4px 0 0;
+        }
+        .upload-area {
+            border: 2px dashed #ccc;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            margin-bottom: 20px;
+            transition: background-color 0.2s;
+        }
+        .upload-area:hover {
+            background-color: #f8f9fa;
+        }
+        .upload-icon {
+            font-size: 48px;
+            color: #6c757d;
+            margin-bottom: 10px;
+        }
+        .settings-panel {
+            margin-top: 20px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 15px;
+            background-color: #f8f9fa;
+        }
+        .file-list {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .run-item {
+            cursor: pointer;
+            padding: 8px 12px;
+            border-radius: 4px;
+            transition: background-color 0.2s;
+        }
+        .run-item:hover {
+            background-color: #f0f0f0;
+        }
+        .alert-floating {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 9999;
+            max-width: 300px;
+        }
+        .cluster-count {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background-color: rgba(0, 123, 255, 0.8);
+            color: white;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 0.8rem;
+        }
+        .preset-btn {
+            margin-right: 5px;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container">
+            <a class="navbar-brand" href="{{ url_for('index') }}">
+                <i class="fas fa-id-badge mr-2"></i>Face Clustering App
+            </a>
+            <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav ml-auto">
+                    <li class="nav-item active">
+                        <a class="nav-link" href="{{ url_for('index') }}">
+                            <i class="fas fa-home mr-1"></i>Home
+                        </a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <!-- Flash messages -->
+        {% with messages = get_flashed_messages() %}
+            {% if messages %}
+                {% for message in messages %}
+                    <div class="alert alert-info alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+                            <span aria-hidden="true">&times;</span>
+                        </button>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <div class="row">
+            <!-- Upload Section -->
+            <div class="col-lg-4">
+                <div class="card mb-4">
+                    <div class="card-header bg-primary text-white">
+                        <h5 class="mb-0"><i class="fas fa-upload mr-2"></i>Upload Images</h5>
+                    </div>
+                    <div class="card-body">
+                        <form method="post" enctype="multipart/form-data" id="uploadForm">
+                            <div class="upload-area" id="dropArea" onclick="document.getElementById('fileInput').click()">
+                                <i class="fas fa-cloud-upload-alt upload-icon"></i>
+                                <p class="mb-0">Click or drag images here</p>
+                                <small class="text-muted">JPG, JPEG, PNG only (max 15MB each)</small>
+                            </div>
+                            <input type="file" id="fileInput" name="images" multiple accept=".jpg,.jpeg,.png" style="display: none;" onchange="document.getElementById('uploadForm').submit()">
+                        </form>
+
+                        <div class="d-flex justify-content-between mt-3">
+                            <div>
+                                <strong>Images in queue:</strong> {{ upload_count }}
+                            </div>
+                            <div>
+                                {% if upload_count > 0 %}
+                                <form method="post" action="{{ url_for('clear_uploads') }}" class="d-inline">
+                                    <button type="submit" class="btn btn-sm btn-outline-danger">
+                                        <i class="fas fa-trash-alt mr-1"></i>Clear All
+                                    </button>
+                                </form>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Clustering Settings -->
+                <div class="card settings-panel mb-4">
+                    <div class="card-header bg-secondary text-white">
+                        <h5 class="mb-0"><i class="fas fa-cogs mr-2"></i>Clustering Settings</h5>
+                    </div>
+                    <div class="card-body">
+                        <!-- Preset Configuration Buttons -->
+                        <div class="mb-3">
+                            <h6 class="mb-2">Preset Configurations:</h6>
+                            <button type="button" class="btn btn-sm btn-outline-primary preset-btn" onclick="setPreset('fast')">
+                                <i class="fas fa-bolt mr-1"></i>Fast
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-primary preset-btn" onclick="setPreset('medium')">
+                                <i class="fas fa-balance-scale mr-1"></i>Medium
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-primary preset-btn" onclick="setPreset('accurate')">
+                                <i class="fas fa-search-plus mr-1"></i>Slow but Accurate
+                            </button>
+                        </div>
+
+                        <form method="post" action="{{ url_for('cluster_now') }}" id="clusterForm">
+                            <div class="form-group">
+                                <label for="tolerance"><i class="fas fa-sliders-h mr-1"></i>Face Match Tolerance</label>
+                                <input type="range" class="custom-range" id="tolerance" name="tolerance" min="0.4" max="0.8" step="0.05" value="0.6" oninput="this.nextElementSibling.value = this.value">
+                                <output>0.6</output>
+                                <small class="form-text text-muted">Lower = stricter matching (0.4-0.8)</small>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="minClusterSize"><i class="fas fa-users mr-1"></i>Minimum Cluster Size</label>
+                                <input type="number" class="form-control" id="minClusterSize" name="min_cluster_size" min="1" value="1">
+                                <small class="form-text text-muted">Minimum faces per cluster</small>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="saveMode"><i class="fas fa-save mr-1"></i>Save Mode</label>
+                                <select class="form-control" id="saveMode" name="save_mode">
+                                    <option value="both">Both Faces & Originals</option>
+                                    <option value="faces">Faces Only</option>
+                                    <option value="originals">Original Images Only</option>
+                                </select>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="detectionModel"><i class="fas fa-search mr-1"></i>Detection Model</label>
+                                <select class="form-control" id="detectionModel" name="detection_model">
+                                    <option value="hog">HOG (Faster)</option>
+                                    <option value="cnn">CNN (More Accurate)</option>
+                                </select>
+                                <small class="form-text text-muted">CNN requires more memory</small>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="upsampleTimes"><i class="fas fa-search-plus mr-1"></i>Upsample Times</label>
+                                <select class="form-control" id="upsampleTimes" name="upsample_times">
+                                    <option value="1">1 (Faster, larger faces)</option>
+                                    <option value="2">2 (Medium)</option>
+                                    <option value="3">3 (Slower, finds smaller faces)</option>
+                                </select>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="minFaceSize"><i class="fas fa-compress mr-1"></i>Minimum Face Size (px)</label>
+                                <input type="number" class="form-control" id="minFaceSize" name="min_face_size" min="10" value="20">
+                                <small class="form-text text-muted">Minimum size to consider a valid face</small>
+                            </div>
+
+                            <button type="submit" class="btn btn-success btn-block" id="clusterButton" {% if not show_cluster_button %}disabled{% endif %}>
+                                <i class="fas fa-play mr-1"></i>Start Clustering
+                            </button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Previous Runs -->
+                <div class="card mb-4">
+                    <div class="card-header bg-info text-white">
+                        <h5 class="mb-0"><i class="fas fa-history mr-2"></i>Previous Runs</h5>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="list-group file-list">
+                            {% if runs %}
+                                {% for run in runs %}
+                                    <a href="{{ url_for('switch_run', run_path=run.path) }}" class="list-group-item list-group-item-action run-item">
+                                        <i class="far fa-clock mr-2"></i>{{ run.date }}
+                                    </a>
+                                {% endfor %}
+                            {% else %}
+                                <div class="p-3 text-center text-muted">
+                                    <i class="fas fa-info-circle mr-1"></i>No previous runs found
+                                </div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Clusters Section -->
+            <div class="col-lg-8">
+                <div class="card mb-4">
+                    <div class="card-header bg-success text-white">
+                        <h5 class="mb-0"><i class="fas fa-th-large mr-2"></i>Face Clusters</h5>
+                    </div>
+                    <div class="card-body">
+                        {% if clusters %}
+                            <div class="row">
+                                {% for cluster in clusters %}
+                                    <div class="col-md-4">
+                                        <div class="card cluster-card">
+                                            <div class="position-relative">
+                                                {% if cluster.preview %}
+                                                    <img src="{{ url_for('static', filename=cluster.preview) }}" class="preview-img" alt="{{ cluster.name }}">
+                                                {% else %}
+                                                    <div class="preview-img bg-light d-flex align-items-center justify-content-center">
+                                                        <i class="fas fa-user fa-3x text-secondary"></i>
+                                                    </div>
+                                                {% endif %}
+                                                <span class="cluster-count">{{ cluster.count }} images</span>
+                                            </div>
+                                            <div class="card-body">
+                                                <h5 class="card-title">{{ cluster.name }}</h5>
+                                                <a href="{{ url_for('view_cluster', cluster_name=cluster.name) }}" class="btn btn-primary btn-sm">
+                                                    <i class="fas fa-images mr-1"></i>View Images
+                                                </a>
+                                            </div>
+                                        </div>
+                                    </div>
+                                {% endfor %}
+                            </div>
+                        {% else %}
+                            <div class="text-center py-5">
+                                <i class="fas fa-user-friends fa-4x mb-3 text-secondary"></i>
+                                <h4>No Face Clusters Yet</h4>
+                                <p class="text-muted">Upload images and start clustering to see results here</p>
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <footer class="bg-dark text-white mt-5 py-3">
+        <div class="container text-center">
+            <small>&copy; 2025 Face Clustering App | Optimized for laptop environments</small>
+        </div>
+    </footer>
+
+    <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.1/dist/umd/popper.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
+    <script>
+        // Drag and drop functionality
+        const dropArea = document.getElementById('dropArea');
+
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            dropArea.addEventListener(eventName, preventDefaults, false);
+        });
+
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropArea.addEventListener(eventName, highlight, false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropArea.addEventListener(eventName, unhighlight, false);
+        });
+
+        function highlight() {
+            dropArea.classList.add('bg-light');
+        }
+
+        function unhighlight() {
+            dropArea.classList.remove('bg-light');
+        }
+
+        dropArea.addEventListener('drop', handleDrop, false);
+
+        function handleDrop(e) {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            document.getElementById('fileInput').files = files;
+            document.getElementById('uploadForm').submit();
+        }
+
+        // Preset configurations
+        function setPreset(preset) {
+            const toleranceSlider = document.getElementById('tolerance');
+            const toleranceOutput = toleranceSlider.nextElementSibling;
+            const minClusterSize = document.getElementById('minClusterSize');
+            const detectionModel = document.getElementById('detectionModel');
+            const upsampleTimes = document.getElementById('upsampleTimes');
+            const minFaceSize = document.getElementById('minFaceSize');
+
+            switch(preset) {
+                case 'fast':
+                    // Fast preset - prioritize speed
+                    toleranceSlider.value = '0.6';
+                    toleranceOutput.value = '0.6';
+                    minClusterSize.value = '1';
+                    detectionModel.value = 'hog';
+                    upsampleTimes.value = '1';
+                    minFaceSize.value = '30';
+                    break;
+                case 'medium':
+                    // Medium preset - balanced settings
+                    toleranceSlider.value = '0.55';
+                    toleranceOutput.value = '0.55';
+                    minClusterSize.value = '1';
+                    detectionModel.value = 'hog';
+                    upsampleTimes.value = '2';
+                    minFaceSize.value = '20';
+                    break;
+                case 'accurate':
+                    // Accurate preset - prioritize accuracy
+                    toleranceSlider.value = '0.5';
+                    toleranceOutput.value = '0.5';
+                    minClusterSize.value = '1';
+                    detectionModel.value = 'cnn';
+                    upsampleTimes.value = '3';
+                    minFaceSize.value = '15';
+                    break;
+            }
+        }
+    </script>
+</body>
+</html>
